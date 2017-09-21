@@ -1,0 +1,435 @@
+{
+ "AWSTemplateFormatVersion":"2010-09-09",
+   "Description": "BlueScope Create Windows AMI",
+"Resources":{
+
+      "rManagedInstanceRole" : {
+         "Type":"AWS::IAM::Role",
+         "Properties":{
+            "AssumeRolePolicyDocument": {
+               "Version" : "2012-10-17",
+               "Statement" : [
+                 {
+                  "Effect": "Allow",
+                  "Principal": {
+                     "Service": [
+                        "ssm.amazonaws.com",
+                        "ec2.amazonaws.com"
+                      ]
+                  },
+                  "Action": "sts:AssumeRole"
+                 }
+                ]
+             },
+             "ManagedPolicyArns" : [ "arn:aws:iam::aws:policy/AmazonEC2FullAccess", "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM", "arn:aws:iam::aws:policy/AmazonS3FullAccess", "arn:aws:iam::aws:policy/AmazonSSMFullAccess", "arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole"],
+             "Path" : "/",
+             "RoleName" : { "Fn::Join" : [ "-", [ "CreateWindowsAMIInstanceRole", { "Ref" : "AWS::Region" } ] ] }
+           }
+      },
+      "rManagedInstanceProfile" : {
+	"Type" : "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Path" : "/",
+          "Roles" : [ { "Ref" : "rManagedInstanceRole" } ],
+          "InstanceProfileName": { "Fn::Join" : [ "-", [ "CreateWindowsAMIManagedInstanceProfile", { "Ref" : "AWS::Region" } ] ] }
+         },
+         "DependsOn" : "rManagedInstanceRole"
+      },
+      "rAutomationServiceRole" : {
+         "Type":"AWS::IAM::Role",
+         "DependsOn" : "rManagedInstanceRole",
+         "Properties":{
+            "AssumeRolePolicyDocument": {
+               "Version" : "2012-10-17",
+               "Statement" : [
+                 {
+                  "Effect": "Allow",
+                  "Principal": {
+                     "Service": [
+                        "ssm.amazonaws.com",
+                        "ec2.amazonaws.com"
+                      ]
+                  },
+                  "Action": "sts:AssumeRole"
+                 }
+                ]
+             },
+             "ManagedPolicyArns" : [ "arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole" , "arn:aws:iam::aws:policy/AmazonEC2FullAccess" , "arn:aws:iam::aws:policy/AmazonS3FullAccess", "arn:aws:iam::aws:policy/AmazonSSMFullAccess" ], 
+             "Path" : "/",
+             "RoleName" : { "Fn::Join" : [ "-", [ "CreateWindowsAMIAutomationServiceRole", { "Ref" : "AWS::Region" } ] ] },
+             "Policies" : [
+               {
+                "PolicyName" : "passrole",
+                "PolicyDocument" : {
+                   "Version" : "2012-10-17",
+                   "Statement" : [
+                      {
+                        "Effect": "Allow",
+                        "Action": [
+                          "iam:PassRole"
+                         ],
+                         "Resource" : [
+                            { "Fn::GetAtt" : "rManagedInstanceRole.Arn" }
+                         ]
+                       }
+                      ]
+                  }
+                }
+              ]
+	  }
+      },
+      "rCreateWindowsAMIAutomation": {
+         "Type":"AWS::SSM::Document",
+         "DependsOn" : "rAutomationServiceRole",
+         "DependsOn" : "rManagedInstanceProfile",
+         "Properties":{
+            "DocumentType" : "Automation",
+            "Content":{
+  "schemaVersion": "0.3",
+  "description": "Updates a Microsoft Windows AMI. By default it will install all Windows updates, Amazon software, and Amazon drivers. It will then sysprep and create a new AMI. Supports Windows Server 2008 R2 and greater.",
+  "assumeRole": { "Fn::GetAtt" : "rAutomationServiceRole.Arn" },
+  "parameters": {
+    "SourceAmiId": {
+      "type": "String",
+      "description": "(Required) The source Amazon Machine Image ID."
+    },
+    "TargetAmiName": {
+        "type": "String",
+        "description": "(Optional) The name of the new AMI that will be created. Default is a system-generated string including the source AMI id, and the creation time and date.",
+        "default": "QS-SOE-WINDOWS-2K12-R2"
+    },
+    "InstanceType": {
+        "type": "String",
+        "description": "(Optional) Type of instance to launch as the workspace host. Default is t2.medium.",
+        "default": "t2.medium"
+    },
+    "KeyName" : {
+      "type" : "String",
+      "default" : "gwillis9-test"
+    },
+    "CustomerBucket" : {
+      "type" : "String",
+      "default" : { "Fn::Join" : ["", ["dxc.customer.config-", { "Ref" : "AWS::AccountId" }, "-", { "Ref" : "AWS::Region" } ]] }
+    },
+    "OSName" : {
+      "type" : "String",
+      "default" : "win-2016"
+    },
+    "OSVersion" : {
+      "type" : "String",
+      "default" : "v1.0"
+    },
+    "SubnetId" : {
+      "type" : "String",
+      "default" : "subnet-a68419c2"
+    },
+    "SecurityGroup" : {
+      "type" : "String",
+      "default" : "sg-02d80e65"
+    }
+
+  },
+  "mainSteps": [
+    {
+      "name": "LaunchInstance",
+      "action": "aws:runInstances",
+      "timeoutSeconds": 1800,
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "inputs": {
+        "ImageId": "{{ SourceAmiId  }}",
+        "InstanceType": "{{ InstanceType }}",
+        "MinInstanceCount": 1,
+        "MaxInstanceCount": 1,
+        "IamInstanceProfileName": { "Ref" : "rManagedInstanceProfile" },
+        "SubnetId" : "{{ SubnetId }}", 
+        "SecurityGroupIds" : [ "{{ SecurityGroup }}" ]
+      }
+    },
+   {
+      "name": "UpdateSSMAgent",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 600,
+      "inputs": {
+        "DocumentName": "AWS-UpdateSSMAgent",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters" : {
+           "allowDowngrade" : "false"
+        }
+      }
+    },
+    {
+      "name": "UpdateEC2Config",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 7200,
+      "inputs": {
+        "DocumentName": "AWS-InstallPowerShellModule",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "executionTimeout": "7200",
+          "source": "https://aws-ssm-downloads-{{global:REGION}}.s3.amazonaws.com/PSModules/AWSUpdateWindowsInstance/Latest/AWSUpdateWindowsInstance.zip",
+          "sourceHash": "14CAD416F4A054894EBD2091EA4B99E542368BE5895BDD466B567C1ABA87C87C",
+          "commands": [
+            "Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force",
+            "Import-Module AWSUpdateWindowsInstance",
+            "if ([Environment]::OSVersion.Version.Major -ge 10) {",
+            "  Install-AwsUwiEC2Launch -Id {{ automation:EXECUTION_ID }}",
+            "} else {",
+            "  Install-AwsUwiEC2Config -Id {{ automation:EXECUTION_ID }}",
+            "}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "UpdateAWSPVDriver",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 600,
+      "inputs": {
+        "DocumentName": "AWS-ConfigureAWSPackage",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "name": "AWSPVDriver",
+          "action": "Install"
+        }
+      }
+    },
+    {
+      "name": "InstallWindowsUpdates",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 14400,
+      "inputs": {
+        "DocumentName": "AWS-InstallWindowsUpdates",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "Action": "Install",
+          "IncludeKbs": "",
+          "ExcludeKbs": "",
+          "Categories": "",
+          "SeverityLevels": ""
+        }
+      }
+    },
+
+
+
+{
+      "name": "InstallPython",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 600,
+      "inputs": {
+        "DocumentName": "AWS-RunPowerShellScript",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "commands": [
+
+"$regionUrl = 'http://169.254.169.254/latest/dynamic/instance-identity/document/region'\n",
+"$metadata = (New-Object Net.WebClient).DownloadString($regionUrl)\n",
+"$region = (ConvertFrom-JSON $metadata).region\n",
+
+"$dxc_bucket=\"{{CustomerBucket}}\"\n",
+"New-Item -ItemType directory -Path \"C:\\Temp\" -Force\n",
+"$pythonExe=\"python-3.5.3.exe\"\n",
+"Copy-S3Object -BucketName $dxc_bucket -key deploy/externs/$pythonExe -Region $region -LocalFile \"c:\\Temp\\${pythonExe}\"\n",
+"Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass \n",
+"$work=\"c:\\Temp\\${pythonExe} /quiet /passive InstallAllUsers=1 PrependPath=1 \" \n",
+"iex $work \n",
+"Start-Sleep -s 120 \n",
+"$PATH=[Environment]::GetEnvironmentVariable(\"PATH\") \n",
+"Write-Host $PATH\n",
+"$mydir=\"C:\\Program Files (x86)\\Python35-32\" \n",
+"Write-Host \"directory $mydir \" \n",
+"[Environment]::SetEnvironmentVariable(\"PATH\", \"$mydir;${mydir}\\Scripts\") \n",
+"python.exe -m ensurepip \n",
+"Write-Host \"Python\" \n",
+"pip3 install --upgrade awscli \n ",
+"Write-Host \"Done install\" \n"
+]
+} }
+},
+
+
+{
+      "name": "CloudWatchLogs",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 600,
+      "inputs": {
+        "DocumentName": "AWS-RunPowerShellScript",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "commands": [
+
+"$regionUrl = 'http://169.254.169.254/latest/dynamic/instance-identity/document/region'\n",
+"$metadata = (New-Object Net.WebClient).DownloadString($regionUrl)\n",
+"$region = (ConvertFrom-JSON $metadata).region\n",
+
+
+"$fileName=\"C:\\Program Files\\Amazon\\SSM\\Plugins\\awsCloudWatch\\AWS.EC2.Windows.CloudWatch.json\" \n",
+"$bucket=\"{{CustomerBucket}}\" \n",
+"Read-S3Object -BucketName $bucket -Key deploy/documents/AWS.EC2.Windows.CloudWatch.json -File \"$fileName\" -Region $region \n",
+"$content=[System.IO.File]::ReadAllText(\"$fileName\") \n",
+"$content=$content.Replace(\"ap-southeast-2\", $region) \n",
+"[System.IO.File]::WriteAllText(\"$fileName\", $content) \n"
+] }
+} }
+,
+
+{
+
+      "name": "InstallZabbix",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 600,
+      "inputs": {
+        "DocumentName": "AWS-RunPowerShellScript",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "commands": [
+
+"$regionUrl = 'http://169.254.169.254/latest/dynamic/instance-identity/document/region'\n",
+"$metadata = (New-Object Net.WebClient).DownloadString($regionUrl)\n",
+"$region = (ConvertFrom-JSON $metadata).region\n",
+
+"$bucket=\"{{CustomerBucket}}\" \n",
+"$crowdStrikeExe=\"WindowsSensor_5121_NGAV_INCLUDED.exe\" \n",
+"Read-S3Object -BucketName $bucket -key deploy/externs/$crowdStrikeExe -Region $region -File c:\\Temp\\$crowdStrikeExe \n",
+"cd c:\\Temp \n",
+"$installer=\"./$crowdStrikeExe /install /quiet /passive /norestart CID=5F983CA84F27459B9B2A025AC483EEB9-C0 \" \n ",
+"iex $installer \n",
+"$counter=30 \n",
+"do { \n",
+"   start-sleep -s 10 \n",
+"   $counter-- \n",
+"   get-service | findstr /i /r \"Running.*.CrowdStrike\" \n",
+"} while ($LASTEXITCODE -gt 0 -and $counter -gt 0) \n ",
+"$instanceId=Invoke-RestMethod http://169.254.169.254/latest/meta-data/instance-id \n ",
+"Rename-Computer -NewName \"$instanceId\" -Force \n"
+
+] }
+} },
+
+
+{
+      "name": "SOEHardening",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 600,
+      "inputs": {
+        "DocumentName": "AWS-RunPowerShellScript",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "commands": [
+"New-Item C:\\TEMP\\soe -type directory -force \n",
+"copy-s3object -bucketname \"{{CustomerBucket}}\" -key \"deploy/soe-hardening/windows/install_win_soe.ps1\" -LocalFile \"c:\\TEMP\\soe\\install_win_soe.ps1\" \n",
+"copy-s3object -bucketname \"{{CustomerBucket}}\" -key \"deploy/soe-hardening/windows/setup.ps1\" -LocalFile \"c:\\TEMP\\soe\\setup.ps1\" \n",
+"copy-s3object -bucketname \"{{CustomerBucket}}\" -key \"deploy/soe-hardening/windows/wincompliance.zip\" -LocalFile \"c:\\TEMP\\soe\\wincompliance.zip\" \n",
+"cd c:\\TEMP\\soe \n",
+"powershell -executionpolicy bypass -File  .\\install_win_soe.ps1 \n"
+] }
+} },
+
+
+    {
+      "name": "RunSysprepGeneralize",
+      "action": "aws:runCommand",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "timeoutSeconds": 7200,
+      "inputs": {
+        "DocumentName": "AWS-InstallPowerShellModule",
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "Parameters": {
+          "executionTimeout": "7200",
+          "source": "https://aws-ssm-downloads-{{global:REGION}}.s3.amazonaws.com/PSModules/AWSUpdateWindowsInstance/Latest/AWSUpdateWindowsInstance.zip",
+          "sourceHash": "14CAD416F4A054894EBD2091EA4B99E542368BE5895BDD466B567C1ABA87C87C",
+          "commands": [
+            "Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force",
+            "Import-Module AWSUpdateWindowsInstance",
+            "Start-AwsUwiSysprep -Id {{ automation:EXECUTION_ID }}"
+          ]
+        }
+      }
+    },
+    {
+      "name":"StopInstance",
+      "action": "aws:changeInstanceState",
+      "maxAttempts": 3,
+      "timeoutSeconds": 7200,
+      "onFailure": "Abort",
+      "inputs": {
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "CheckStateOnly": false,
+        "DesiredState": "stopped"
+      }
+    },
+    {
+      "name":"CreateImage",
+      "action": "aws:createImage",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "inputs": {
+        "InstanceId": "{{ LaunchInstance.InstanceIds }}",
+        "ImageName":  "{{ TargetAmiName }}-{{OSVersion}}",
+        "NoReboot": true,
+        "ImageDescription": "Test CreateImage Description"
+      }
+    },
+    {
+      "name": "CreateTags",
+      "action": "aws:createTags",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "inputs": {
+        "ResourceType": "EC2",
+        "ResourceIds": ["{{ CreateImage.ImageId }}"],
+        "Tags": [
+          {
+            "Key": "Original_AMI_ID",
+            "Value": "Created from {{ SourceAmiId }}"
+          },
+          {
+            "Key" : "ami",
+            "Value" : "ANZ_AWS_Practice"
+          },
+          {
+            "Key" : "os",
+            "Value" : "{{OSName}}"
+          },
+          {
+            "Key" : "version",
+            "Value" : "{{OSVersion}}"
+          }
+        ]
+      }
+    },
+    {
+      "name":"TerminateInstance",
+      "action": "aws:changeInstanceState",
+      "maxAttempts": 3,
+      "onFailure": "Abort",
+      "inputs": {
+        "InstanceIds": ["{{ LaunchInstance.InstanceIds }}"],
+        "DesiredState": "terminated"
+      }
+    }
+  ],
+  "outputs":["CreateImage.ImageId"]
+}
+}
+}
+}
+}
